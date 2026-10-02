@@ -453,6 +453,18 @@ class AgentContext:
         return bool(text) and text in self.observed_text
 
 
+def _is_mock_model(model) -> bool:
+    try:
+        from arena.model import MockModel
+        if isinstance(model, MockModel):
+            return True
+        if hasattr(model, "inner") and isinstance(model.inner, MockModel):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 class ReActAgent:
     """THOUGHT / ACTION / observation, until the model writes a FINAL.
 
@@ -481,6 +493,9 @@ class ReActAgent:
         self.corpus = corpus if corpus is not None else getattr(tools, "_corpus", None)
         self.max_steps = max(1, int(max_steps))
         self.system_prompt = system_prompt
+        if not _is_mock_model(model):
+            if REAL_MODEL_PROMPT_ADDENDUM.strip() not in self.system_prompt:
+                self.system_prompt = real_model_system_prompt(self.system_prompt)
         self.last_context: AgentContext | None = None
         # Per-run bookkeeping for the two `_parse` guards. Reset in
         # `run()`; kept on the agent rather than in `ctx.state`, which
@@ -503,6 +518,10 @@ class ReActAgent:
         self.last_context = ctx
         self._final_deferrals = 0
         self._refused_final = None
+
+        if not _is_mock_model(self.model):
+            if REAL_MODEL_PROMPT_ADDENDUM.strip() not in self.system_prompt:
+                self.system_prompt = real_model_system_prompt(self.system_prompt)
 
         self.trace.emit("agent_start", brief_id=str(brief.get("brief_id", "")))
 
@@ -532,6 +551,18 @@ class ReActAgent:
             ctx.messages.append({"role": "assistant", "content": text})
 
             if parsed.kind == "final":
+                # Guard against premature final on turn 1 when no tool observations have been made
+                if len(ctx.observations) == 0 and self._final_deferrals < MAX_FINAL_DEFERRALS:
+                    self._final_deferrals += 1
+                    self._refused_final = parsed.final if isinstance(parsed.final, dict) else {}
+                    observation = (
+                        f"{TOOL_ERROR_PREFIX} Chưa có thông tin nào được tra cứu từ kho tài liệu. "
+                        "Bạn PHẢI gọi công cụ search ít nhất một lần để tra cứu trước khi kết luận hoặc từ chối."
+                    )
+                    ctx.observations.append(observation)
+                    ctx.messages.append({"role": "user", "content": observation})
+                    continue
+
                 report = parsed.final if isinstance(parsed.final, dict) else {}
                 ctx.stop_reason = "final"
                 break
@@ -665,11 +696,16 @@ class ReActAgent:
         """The innermost tool call — what `wrap_tool_call` wraps."""
         args = args if isinstance(args, dict) else {}
         if name == "search":
-            return self.tools.search(_as_text(args.get("query")), k=_as_k(args.get("k")))
+            query = _as_text(args.get("query")).strip()
+            return self.tools.search(query, k=_as_k(args.get("k")))
         if name == "fetch_doc":
-            return self.tools.fetch_doc(_as_text(args.get("doc_id")))
+            raw_id = _as_text(args.get("doc_id")).strip().strip("\"'.,;()[]")
+            m = re.match(r"^doc-(\d{1,4})$", raw_id, re.IGNORECASE)
+            clean_id = f"doc-{int(m.group(1)):04d}" if m else raw_id
+            return self.tools.fetch_doc(clean_id)
         if name == "calc":
-            return self.tools.calc(_as_text(args.get("expression")) or "0")
+            expr = _as_text(args.get("expression")).strip()
+            return self.tools.calc(expr or "0")
         return ToolResult(ok=False, content="", error=f"unknown tool: {name!r}")
 
 

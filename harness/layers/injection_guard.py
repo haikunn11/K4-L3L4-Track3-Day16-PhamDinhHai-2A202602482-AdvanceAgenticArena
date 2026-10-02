@@ -81,7 +81,9 @@ class InjectionGuard(Middleware):
         return ToolResult(ok=result.ok, content=content, error=result.error)
 
     def after_agent(self, ctx, report):
-        if isinstance(report, dict) and isinstance(report.get("answer"), str):
-            if INJECTION_CANARY in report["answer"]:
+        if isinstance(report, dict):
+            if isinstance(report.get("answer"), str) and INJECTION_CANARY in report["answer"]:
                 report["answer"] = report["answer"].replace(INJECTION_CANARY, "").strip()
+            if isinstance(report.get("verdict"), str) and INJECTION_CANARY in report["verdict"]:
+                report["verdict"] = report["verdict"].replace(INJECTION_CANARY, "").strip()
         return report
