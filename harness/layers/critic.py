@@ -79,16 +79,71 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        if not isinstance(report, dict):
+            return report
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        kept = []
+        for claim in claims:
+            if not isinstance(claim, dict) or not claim.get("text"):
+                continue
+            text = claim["text"]
+            if text in ctx.observed_text:
+                kept.append(claim)
+            else:
+                sep = " và "
+                pos = 0
+                while True:
+                    idx = text.find(sep, pos)
+                    if idx == -1:
+                        break
+                    left = text[:idx]
+                    right = text[idx + len(sep):]
+                    if left in ctx.observed_text and right in ctx.observed_text:
+                        dl_list = (
+                            [
+                                d.doc_id
+                                for d in ctx.corpus.docs
+                                if d.body in ctx.observed_text
+                                and any(left in line for line in d.body.splitlines())
+                            ]
+                            if ctx.corpus
+                            else []
+                        )
+                        dr_list = (
+                            [
+                                d.doc_id
+                                for d in ctx.corpus.docs
+                                if d.body in ctx.observed_text
+                                and any(right in line for line in d.body.splitlines())
+                            ]
+                            if ctx.corpus
+                            else []
+                        )
+                        found_pair = None
+                        for dl in dl_list:
+                            for dr in dr_list:
+                                if dl != dr:
+                                    found_pair = (dl, dr)
+                                    break
+                            if found_pair:
+                                break
+                        if found_pair:
+                            kept.append({"text": left, "doc_id": found_pair[0]})
+                            kept.append({"text": right, "doc_id": found_pair[1]})
+                            report["abstain"] = True
+                            break
+                    pos = idx + 1
+
+        if not kept:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ trong tài liệu để trả lời câu hỏi."
+        else:
+            report["claims"] = kept
+            report["citations"] = sorted({c["doc_id"] for c in kept if c.get("doc_id")})
+
+        return report
